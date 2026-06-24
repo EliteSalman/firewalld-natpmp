@@ -118,7 +118,7 @@ func getDefaultFirewallZone() string {
 }
 
 func main() {
-	configPath := flag.String("config", "/etc/fw-natpmp/config.yaml", "Path to configuration file")
+	configPath := flag.String("config", "/etc/firewalld-natpmp/config.yaml", "Path to configuration file")
 	flag.Parse()
 
 	if err := loadConfig(*configPath); err != nil {

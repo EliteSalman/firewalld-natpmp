@@ -2,11 +2,11 @@
 
 `firewalld-natpmp` is a lightweight, conflict-free NAT-PMP (RFC 6886) daemon built specifically for modern Linux routers using `firewalld`. 
 
-Legacy tools like `miniupnpd` were designed before `nftables` and `firewalld` became the standard. They hijack kernel netfilter hooks, which regularly causes conflicts with WireGuard routing, interface masquerading, and firewall reloads. `fw-natpmp` solves this by acting as a native extension to the `firewalld` ecosystem.
+Legacy tools like `miniupnpd` were designed before `nftables` and `firewalld` became the standard. They hijack kernel netfilter hooks, which regularly causes conflicts with WireGuard routing, interface masquerading, and firewall reloads. `firewalld-natpmp` solves this by acting as a native extension to the `firewalld` ecosystem.
 
 ## Architecture & Features
 
-* **Native D-Bus Integration:** Instead of executing slow shell commands or manipulating kernel tables directly, `fw-natpmp` communicates exclusively through the `firewalld` D-Bus socket.
+* **Native D-Bus Integration:** Instead of executing slow shell commands or manipulating kernel tables directly, `firewalld-natpmp` communicates exclusively through the `firewalld` D-Bus socket.
 * **Zero Orphaned Rules:** Rule expiration is offloaded entirely to `firewalld`'s internal timer engine. If the daemon crashes, `firewalld` will still securely tear down the open port at the precise moment the lease expires.
 * **Auto-Healing:** If `firewalld` is restarted or reloaded, the daemon automatically re-establishes the D-Bus connection and restores active client states upon their next renewal heartbeat.
 * **Security Hardened:** Includes protection against privileged port hijacking (e.g., SSH/HTTPS interception) and limits concurrent active rules per IP to prevent state exhaustion Denial of Service (DoS).
@@ -34,7 +34,7 @@ You will need Go 1.18+ installed.
 git clone [https://github.com/EliteSalman/firewalld-natpmp.git](https://github.com/EliteSalman/firewalld-natpmp.git)
 cd firewalld-natpmp
 go build -ldflags="-s -w" -o firewalld-natpmp main.go
-sudo cp fw-natpmp /usr/sbin/
+sudo cp firewalld-natpmp /usr/sbin/
 ```
 
 If compiling from source, deploy the systemd unit and configuration manually:
@@ -42,7 +42,7 @@ If compiling from source, deploy the systemd unit and configuration manually:
 ```bash
 sudo mkdir -p /etc/firewalld-natpmp
 sudo cp config.yaml /etc/firewalld-natpmp/
-sudo cp fw-natpmp.service /usr/lib/systemd/system/
+sudo cp firewalld-natpmp.service /usr/lib/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now firewalld-natpmp
 ```

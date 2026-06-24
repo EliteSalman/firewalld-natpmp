@@ -1,4 +1,4 @@
-module fw-natpmp
+module firewalld-natpmp
 
 go 1.26.4
 

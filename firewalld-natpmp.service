@@ -5,7 +5,7 @@ Requires=firewalld.service dbus.socket
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/fw-natpmp -config /etc/fw-natpmp/config.yaml
+ExecStart=/usr/sbin/firewalld-natpmp -config /etc/firewalld-natpmp/config.yaml
 Restart=on-failure
 RestartSec=5
 
@@ -18,7 +18,7 @@ ProtectControlGroups=yes
 RestrictRealtime=yes
 NoNewPrivileges=yes
 
-ReadWritePaths=/etc/fw-natpmp
+ReadWritePaths=/etc/firewalld-natpmp
 
 [Install]
 WantedBy=

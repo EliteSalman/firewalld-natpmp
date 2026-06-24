@@ -4,7 +4,7 @@ Release:        1%{?dist}
 Summary:        Native D-Bus NAT-PMP daemon for firewalld
 
 License:        GPL-3.0-or-later
-URL:            https://github.com/salmanshafi/fw-natpmp
+URL:            https://github.com/salmanshafi/firewalld-natpmp
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  golang >= 1.18
