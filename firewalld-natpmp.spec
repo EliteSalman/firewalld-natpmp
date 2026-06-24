@@ -4,8 +4,8 @@ Release:        1%{?dist}
 Summary:        Native D-Bus NAT-PMP daemon for firewalld
 
 License:        GPL-3.0-or-later
-URL:            https://github.com/salmanshafi/firewalld-natpmp
-Source0:        %{name}-%{version}.tar.gz
+URL:            https://github.com/EliteSalman/%{name}
+Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 
 BuildRequires:  golang >= 1.18
 BuildRequires:  systemd-rpm-macros
@@ -18,13 +18,11 @@ and offloading lease timeouts to the kernel, it eliminates netfilter hook
 conflicts and orphaned rules common in legacy UPnP/PCP daemons.
 
 %prep
-%autosetup
+%autosetup -n %{name}-%{version}
 
 %build
 export CGO_ENABLED=0
 export GO111MODULE=on
-
-# The compiler will automatically download dependencies here
 go build -buildmode=pie -ldflags="-s -w -extldflags '-static'" -o %{name} main.go
 
 %install
@@ -52,5 +50,3 @@ install -Dpm 0644 %{name}.service %{buildroot}%{_unitdir}/%{name}.service
 %changelog
 * Wed Jun 24 2026 Salman Shafi <hello@salmanshafi.net> - 1.0.0-1
 - Initial public release
-- Implement D-Bus API integration for firewalld NAT-PMP mapping
-- Add client rate-limiting, timeout offloading, and privileged port protection
