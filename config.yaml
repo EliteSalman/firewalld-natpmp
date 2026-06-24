@@ -1,0 +1,20 @@
+# Interface to listen on for NAT-PMP requests (e.g., wg0, eth1)
+# Security: MUST be a trusted internal interface, never a public WAN.
+listen_interface: "wg0"
+
+# Port to listen on (Default: 5351 per RFC 6886)
+listen_port: 5351
+
+# The firewalld zone to apply dynamic rules to. 
+# If left blank (""), the daemon will auto-detect the default active zone.
+firewall_zone: ""
+
+# Maximum allowed lifetime for a port mapping in seconds (e.g., 86400 = 24 hours)
+max_lifetime: 86400
+
+# Minimum allowed external port to prevent hijacking of privileged host services (e.g., SSH, HTTPS)
+min_port: 1024
+
+# Maximum concurrent port mappings allowed per client IP
+# Prevents state exhaustion attacks on firewalld's D-Bus interface and conntrack table.
+max_ports_per_client: 50

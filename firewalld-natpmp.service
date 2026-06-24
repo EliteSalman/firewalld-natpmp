@@ -1,0 +1,24 @@
+[Unit]
+Description=Firewalld NAT-PMP Daemon
+After=network-online.target firewalld.service dbus.socket
+Requires=firewalld.service dbus.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/fw-natpmp -config /etc/fw-natpmp/config.yaml
+Restart=on-failure
+RestartSec=5
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+NoNewPrivileges=yes
+
+ReadWritePaths=/etc/fw-natpmp
+
+[Install]
+WantedBy=
