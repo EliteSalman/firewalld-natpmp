@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           firewalld-natpmp
-Version:        1.0.0
+Version:        1.0.1
 Release:        1%{?dist}
 Summary:        Native D-Bus NAT-PMP daemon for firewalld
 
@@ -50,6 +50,9 @@ install -Dpm 0644 %{name}.service %{buildroot}%{_unitdir}/%{name}.service
 %{_unitdir}/%{name}.service
 
 %changelog
+* Wed Jun 24 2026 Salman Shafi <hello@salmanshafi.net> - 1.0.1-1
+- Fix systemd service not enabling due to missing WantedBy target
+
 * Wed Jun 24 2026 Salman Shafi <hello@salmanshafi.net> - 1.0.0-1
 - Initial public release
 - Implement D-Bus API integration for firewalld NAT-PMP mapping

@@ -21,4 +21,4 @@ NoNewPrivileges=yes
 ReadWritePaths=/etc/firewalld-natpmp
 
 [Install]
-WantedBy=
+WantedBy=multi-user.target
