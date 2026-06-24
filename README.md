@@ -1,6 +1,6 @@
-# fw-natpmp
+# firewalld-natpmp
 
-`fw-natpmp` is a lightweight, conflict-free NAT-PMP (RFC 6886) daemon built specifically for modern Linux routers using `firewalld`. 
+`firewalld-natpmp` is a lightweight, conflict-free NAT-PMP (RFC 6886) daemon built specifically for modern Linux routers using `firewalld`. 
 
 Legacy tools like `miniupnpd` were designed before `nftables` and `firewalld` became the standard. They hijack kernel netfilter hooks, which regularly causes conflicts with WireGuard routing, interface masquerading, and firewall reloads. `fw-natpmp` solves this by acting as a native extension to the `firewalld` ecosystem.
 
@@ -22,34 +22,34 @@ Legacy tools like `miniupnpd` were designed before `nftables` and `firewalld` be
 For RHEL, AlmaLinux, Fedora, and compatible derivatives, the daemon is packaged and maintained in COPR.
 
 ```bash
-sudo dnf copr enable elitesalman/fw-natpmp
-sudo dnf install fw-natpmp
-sudo systemctl enable --now fw-natpmp
+sudo dnf copr enable elitesalman/firewalld-natpmp
+sudo dnf install firewalld-natpmp
+sudo systemctl enable --now firewalld-natpmp
 ```
 
 ### Method 2: Compile From Source
 You will need Go 1.18+ installed.
 
 ```bash
-git clone [https://github.com/EliteSalman/fw-natpmp.git](https://github.com/EliteSalman/fw-natpmp.git)
-cd fw-natpmp
-go build -ldflags="-s -w" -o fw-natpmp main.go
+git clone [https://github.com/EliteSalman/firewalld-natpmp.git](https://github.com/EliteSalman/firewalld-natpmp.git)
+cd firewalld-natpmp
+go build -ldflags="-s -w" -o firewalld-natpmp main.go
 sudo cp fw-natpmp /usr/sbin/
 ```
 
 If compiling from source, deploy the systemd unit and configuration manually:
 
 ```bash
-sudo mkdir -p /etc/fw-natpmp
-sudo cp config.yaml /etc/fw-natpmp/
+sudo mkdir -p /etc/firewalld-natpmp
+sudo cp config.yaml /etc/firewalld-natpmp/
 sudo cp fw-natpmp.service /usr/lib/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now fw-natpmp
+sudo systemctl enable --now firewalld-natpmp
 ```
 
 ## Configuration
 
-The configuration file is located at `/etc/fw-natpmp/config.yaml`. 
+The configuration file is located at `/etc/firewalld-natpmp/config.yaml`. 
 
 ```yaml
 # Interface to listen on for NAT-PMP requests (e.g., eth1, eth2)
