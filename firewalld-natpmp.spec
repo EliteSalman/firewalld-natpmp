@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           firewalld-natpmp
-Version:        1.2.0
+Version:        1.2.1
 Release:        1%{?dist}
 Summary:        Native D-Bus NAT-PMP daemon for firewalld
 
@@ -50,6 +50,12 @@ install -Dpm 0644 %{name}.service %{buildroot}%{_unitdir}/%{name}.service
 %{_unitdir}/%{name}.service
 
 %changelog
+* Fri Jun 26 2026 Salman Shafi <elitesalman@fedoraproject.org> - 1.2.1-1
+- Update to upstream version 1.2.1
+- Complete implementation of durability, reload resilience, and graceful shutdown features
+- Add RuntimeDirectory to systemd service file to satisfy ProtectSystem=strict constraints
+- Relocate internal state JSON destination to /run/firewalld-natpmp/state.json
+
 * Fri Jun 26 2026 Salman Shafi <hello@salmanshafi.net> - 1.2.0-1
 - Decoupled NAT rule lifecycle from firewalld timeouts using zero-timeout permanent rules and internal timers
 - Implemented D-Bus Reloaded signal interception for automatic runtime state recovery
