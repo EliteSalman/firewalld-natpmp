@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           firewalld-natpmp
-Version:        1.0.1
+Version:        1.1.0
 Release:        1%{?dist}
 Summary:        Native D-Bus NAT-PMP daemon for firewalld
 
