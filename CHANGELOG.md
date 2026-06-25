@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.2.1] - 2026-06-26
+
+### Fixed
+* Patched a deployment mistake where critical durability features intended for v1.2.0 (including D-Bus `Reloaded` signal interception, JSON state persistence, and graceful `os/signal` handling) were accidentally omitted from the pushed source code.
+* Relocated the state persistence file path to `/run/firewalld-natpmp/state.json`. This fixes the runtime write failures caused by systemd's `ProtectSystem=strict` sandbox constraint using the proper `RuntimeDirectory` environment.
+
 ## [1.2.0] - 2026-06-26
 
 ### Added
@@ -34,7 +43,6 @@ All notable changes to this project will be documented in this file.
 - Brought external port allocation into full compliance with RFC 6886 §3.3 by generating a random available ephemeral port when a client requests `extPort == 0`.
 - Implemented complete mapping teardown logic according to RFC 6886 when an internal port of `0` or an explicit dual-zero configuration is received.
 
-
 ## [1.0.1] - 2026-06-24
 ### Fixed
 - Added `WantedBy=multi-user.target` to systemd service unit to allow proper enabling/starting via `systemctl`.
@@ -45,4 +53,3 @@ All notable changes to this project will be documented in this file.
 - Implemented RFC 6886 NAT-PMP support
 - Security hardening: rate-limiting and privileged port protection
 - Fedora COPR support included
-

@@ -18,6 +18,7 @@ ProtectControlGroups=yes
 RestrictRealtime=yes
 NoNewPrivileges=yes
 
+RuntimeDirectory=firewalld-natpmp
 ReadWritePaths=/etc/firewalld-natpmp
 
 [Install]

@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"math/big"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -30,6 +33,9 @@ const (
 	ResultNetworkErr     = 3
 	ResultOutOfResources = 4 // Returned for hitting max_ports_per_client limit
 )
+
+// Isolated runtime directory path matching systemd ProtectSystem constraints
+const stateFilePath = "/run/firewalld-natpmp/state.json"
 
 type Config struct {
 	ListenInterface   string `yaml:"listen_interface"`
@@ -53,6 +59,13 @@ type Lease struct {
 type clientState struct {
 	sync.Mutex
 	activePorts map[string]*Lease // key: "proto:extPort"
+}
+
+type recoveryLease struct {
+	IP      string `json:"ip"`
+	Proto   string `json:"proto"`
+	ExtPort uint16 `json:"ext_port"`
+	IntPort uint16 `json:"int_port"`
 }
 
 var (
@@ -103,7 +116,6 @@ func loadConfig(path string) error {
 	return nil
 }
 
-// getDBusConn implements thread-safe connection caching and recovery.
 func getDBusConn() (*dbus.Conn, error) {
 	dbusMu.RLock()
 	if sysBus != nil {
@@ -149,6 +161,98 @@ func getDefaultFirewallZone() string {
 	return zone
 }
 
+func syncStateToDisk() {
+	var active []recoveryLease
+
+	clientStates.Range(func(key, value any) bool {
+		clientIP := key.(string)
+		cs := value.(*clientState)
+		cs.Lock()
+		for _, lease := range cs.activePorts {
+			active = append(active, recoveryLease{
+				IP:      clientIP,
+				Proto:   lease.Protocol,
+				ExtPort: lease.ExtPort,
+				IntPort: lease.IntPort,
+			})
+		}
+		cs.Unlock()
+		return true
+	})
+
+	data, err := json.Marshal(active)
+	if err == nil {
+		_ = os.WriteFile(stateFilePath, data, 0644)
+	}
+}
+
+func recoverAndFlushState() {
+	data, err := os.ReadFile(stateFilePath)
+	if err != nil {
+		return
+	}
+
+	var orphaned []recoveryLease
+	if err := json.Unmarshal(data, &orphaned); err != nil {
+		log.Printf("Failed to parse recovery state: %v", err)
+		return
+	}
+
+	flushed := 0
+	for _, lease := range orphaned {
+		_ = manageFirewalldDBus(lease.Proto, lease.ExtPort, lease.IntPort, lease.IP, false)
+		flushed++
+	}
+
+	if flushed > 0 {
+		log.Printf("Startup flush removed %d orphaned NAT-PMP rules (Admin rules preserved)", flushed)
+	}
+	_ = os.Remove(stateFilePath)
+}
+
+func listenFirewalldReload() {
+	conn, err := getDBusConn()
+	if err != nil {
+		log.Printf("Cannot listen for firewalld reloads: %v", err)
+		return
+	}
+
+	err = conn.AddMatchSignal(
+		dbus.WithMatchInterface("org.fedoraproject.FirewallD1"),
+		dbus.WithMatchMember("Reloaded"),
+	)
+	if err != nil {
+		log.Printf("Failed to subscribe to firewalld DBus signals: %v", err)
+		return
+	}
+
+	c := make(chan *dbus.Signal, 10)
+	conn.Signal(c)
+
+	for v := range c {
+		if v.Name == "org.fedoraproject.FirewallD1.Reloaded" {
+			log.Println("Firewalld reload detected! Restoring active NAT-PMP leases...")
+			restoreActiveRules()
+		}
+	}
+}
+
+func restoreActiveRules() {
+	clientStates.Range(func(key, value any) bool {
+		clientIP := key.(string)
+		cs := value.(*clientState)
+		cs.Lock()
+		for _, lease := range cs.activePorts {
+			err := manageFirewalldDBus(lease.Protocol, lease.ExtPort, lease.IntPort, clientIP, true)
+			if err != nil {
+				log.Printf("Failed to restore rule %s %d for %s: %v", lease.Protocol, lease.ExtPort, clientIP, err)
+			}
+		}
+		cs.Unlock()
+		return true
+	})
+}
+
 func main() {
 	configPath := flag.String("config", "/etc/firewalld-natpmp/config.yaml", "Path to configuration file")
 	flag.Parse()
@@ -157,10 +261,38 @@ func main() {
 		log.Fatalf("Failed to load config from %s: %v", *configPath, err)
 	}
 
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigs
+		log.Println("Shutdown signal received. Tearing down active NAT-PMP rules...")
+		
+		clientStates.Range(func(key, value any) bool {
+			clientIP := key.(string)
+			cs := value.(*clientState)
+			cs.Lock()
+			for _, lease := range cs.activePorts {
+				if lease.Timer != nil {
+					lease.Timer.Stop()
+				}
+				_ = manageFirewalldDBus(lease.Protocol, lease.ExtPort, lease.IntPort, clientIP, false)
+				log.Printf("Cleaned up orphaned rule: %s %d -> %s:%d", lease.Protocol, lease.ExtPort, clientIP, lease.IntPort)
+			}
+			cs.Unlock()
+			return true
+		})
+		_ = os.Remove(stateFilePath)
+		os.Exit(0)
+	}()
+
 	if config.FirewallZone == "" {
 		config.FirewallZone = getDefaultFirewallZone()
 		log.Printf("Auto-detected active firewalld zone: %s", config.FirewallZone)
 	}
+
+	recoverAndFlushState()
+	go listenFirewalldReload()
 
 	listenIP, err := getInterfaceIPv4(config.ListenInterface)
 	if err != nil {
@@ -332,7 +464,6 @@ func handleMappingRequest(conn *net.UDPConn, client *net.UDPAddr, data []byte) {
 		return
 	}
 
-	// Detect active renewals to bypass the execution barrier and prevent network micro-outages
 	val, _ := clientStates.Load(clientIP)
 	isRenewal := false
 	if val != nil {
@@ -396,6 +527,7 @@ func handleTeardown(conn *net.UDPConn, client *net.UDPAddr, opCode uint8, extPor
 	}
 
 	sendMappingResponse(conn, client, opCode, 0, extPort, 0)
+	go syncStateToDisk()
 }
 
 func sendMappingResponse(conn *net.UDPConn, client *net.UDPAddr, opCode uint8, intPort, extPort uint16, lifetime uint32) {
@@ -420,9 +552,9 @@ func sendError(conn *net.UDPConn, client *net.UDPAddr, reqOp uint8, errCode uint
 	_ = binary.Write(buf, binary.BigEndian, uptime)
 
 	if reqOp == OpMapUDP || reqOp == OpMapTCP {
-		_ = binary.Write(buf, binary.BigEndian, uint16(0)) // intPort
-		_ = binary.Write(buf, binary.BigEndian, uint16(0)) // extPort
-		_ = binary.Write(buf, binary.BigEndian, uint32(0)) // lifetime
+		_ = binary.Write(buf, binary.BigEndian, uint16(0)) 
+		_ = binary.Write(buf, binary.BigEndian, uint16(0)) 
+		_ = binary.Write(buf, binary.BigEndian, uint32(0)) 
 	}
 
 	_, _ = conn.WriteToUDP(buf.Bytes(), client)
@@ -439,12 +571,10 @@ func manageFirewalldDBus(proto string, extPort, intPort uint16, ip string, isAdd
 	intStr := strconv.Itoa(int(intPort))
 
 	if isAdd {
-		// Pass timeout 0 to firewalld, shifting lifecycle management entirely to the Go daemon
 		call := obj.Call("org.fedoraproject.FirewallD1.zone.addForwardPort", 0,
 			config.FirewallZone, extStr, proto, intStr, ip, int32(0))
 
 		if call.Err != nil {
-			// Catch desynced runtime states and force an overwrite
 			if strings.Contains(call.Err.Error(), "ALREADY_ENABLED") {
 				_ = obj.Call("org.fedoraproject.FirewallD1.zone.removeForwardPort", 0,
 					config.FirewallZone, extStr, proto, intStr, ip)
@@ -530,14 +660,15 @@ func commitLease(ip string, proto string, extPort, intPort uint16, lifetime uint
 			cs.Unlock()
 			globalPorts.Delete(key)
 
-			// Execute delayed structural mutation
 			_ = manageFirewalldDBus(proto, extPort, intPort, ip, false)
 			log.Printf("Lease expired: Removed mapping %s %d -> %s:%d", proto, extPort, ip, intPort)
+			go syncStateToDisk()
 		})
 		cs.activePorts[key] = lease
 	} else {
 		delete(cs.activePorts, key)
 		globalPorts.Delete(key)
 	}
-}
 
+	go syncStateToDisk()
+}
