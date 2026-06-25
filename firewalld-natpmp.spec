@@ -50,9 +50,15 @@ install -Dpm 0644 %{name}.service %{buildroot}%{_unitdir}/%{name}.service
 %{_unitdir}/%{name}.service
 
 %changelog
+* Thu Jun 25 2026 Salman Shafi <hello@salmanshafi.net> - 1.1.0-1
+- Overhaul daemon architecture to patch critical concurrency data races and bounded resource leaks
+- Implement strict RFC 6886 §3.3 protocol handling for ephemeral port allocation and client teardowns
+- Introduce worker pool limits and optional subnet filtering for hardening against UDP exploitation
+- Resolve memory state desynchronisation on D-Bus transaction errors via two-phase commit updates
+
 * Wed Jun 24 2026 Salman Shafi <hello@salmanshafi.net> - 1.0.1-1
 - Fix systemd service not enabling due to missing WantedBy target
 
 * Wed Jun 24 2026 Salman Shafi <hello@salmanshafi.net> - 1.0.0-1
 - Initial public release
-- Implement D-Bus API integration for firewalld NAT-PMP mapping
+

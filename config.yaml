@@ -1,20 +1,35 @@
-# Interface to listen on for NAT-PMP requests (e.g., wg0, eth1)
-# Security: MUST be a trusted internal interface, never a public WAN.
-listen_interface: "wg0"
+# /etc/firewalld-natpmp/config.yaml
+# Configuration file for the Firewalld NAT-PMP Daemon
 
-# Port to listen on (Default: 5351 per RFC 6886)
+# REQUIRED: The network interface the daemon listens on.
+# You must uncomment and set this to match your environment (e.g., eth1, wg0).
+# listen_interface: "eth1"
+
+# The UDP port to listen for incoming NAT-PMP requests (RFC 6886 default is 5351)
 listen_port: 5351
 
-# The firewalld zone to apply dynamic rules to. 
-# If left blank (""), the daemon will auto-detect the default active zone.
+# The firewalld zone where port-forwarding rules will be dynamically applied.
+# If left blank, the daemon automatically detects and uses the default active system zone.
 firewall_zone: ""
 
-# Maximum allowed lifetime for a port mapping in seconds (e.g., 86400 = 24 hours)
+# Maximum lease lifetime in seconds allowed for a port mapping (Default: 86400 / 24 hours)
 max_lifetime: 86400
 
-# Minimum allowed external port to prevent hijacking of privileged host services (e.g., SSH, HTTPS)
+# Minimum external port allowed for client allocation to prevent privileged port hijacking (Default: 1024)
 min_port: 1024
 
-# Maximum concurrent port mappings allowed per client IP
-# Prevents state exhaustion attacks on firewalld's D-Bus interface and conntrack table.
+# Maximum number of active port mappings allowed per unique client IP address (Default: 50)
 max_ports_per_client: 50
+
+# Security: Restrict incoming requests to a specific subnet (e.g., your local LAN or VPN tunnel).
+# Packets originating from outside this subnet will be dropped to prevent unauthorised WAN access.
+# Uncomment and configure this to match your environment.
+# allowed_subnet: "192.0.2.0/24"
+
+# The external public WAN IP address returned to clients during Public IP queries.
+# If left blank, the daemon falls back to auto-detecting the local outbound routing interface IP.
+# Uncomment and configure this to match your environment if needed.
+# public_ip: "203.0.113.1"
+
+# Security: Maximum number of concurrent worker routines processing UDP packets to prevent memory exhaustion DoS floods (Default: 100)
+worker_pool_size: 100

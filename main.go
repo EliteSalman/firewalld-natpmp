@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"os"
 	"strconv"
@@ -35,18 +37,31 @@ type Config struct {
 	MaxLifetime       uint32 `yaml:"max_lifetime"`
 	MinPort           uint16 `yaml:"min_port"`
 	MaxPortsPerClient int    `yaml:"max_ports_per_client"`
+	AllowedSubnet     string `yaml:"allowed_subnet"`
+	PublicIP          string `yaml:"public_ip"`
+	WorkerPoolSize    int    `yaml:"worker_pool_size"`
+}
+
+type Lease struct {
+	IntPort  uint16
+	ExtPort  uint16
+	Protocol string
+	Timer    *time.Timer
 }
 
 type clientState struct {
 	sync.Mutex
-	activePorts map[uint16]*time.Timer
+	activePorts map[string]*Lease // key: "proto:extPort"
 }
 
 var (
-	startTime    = time.Now()
-	config       Config
-	sysBus       *dbus.Conn
-	clientStates sync.Map
+	startTime     = time.Now()
+	config        Config
+	sysBus        *dbus.Conn
+	dbusMu        sync.RWMutex
+	clientStates  sync.Map
+	globalPorts   sync.Map // key: "proto:extPort" -> value: clientIP (string)
+	allowedSubnet *net.IPNet
 )
 
 func loadConfig(path string) error {
@@ -61,7 +76,6 @@ func loadConfig(path string) error {
 		return err
 	}
 
-	// Apply robust defaults
 	if config.ListenPort == 0 {
 		config.ListenPort = 5351
 	}
@@ -74,43 +88,60 @@ func loadConfig(path string) error {
 	if config.MaxPortsPerClient == 0 {
 		config.MaxPortsPerClient = 50
 	}
+	if config.WorkerPoolSize == 0 {
+		config.WorkerPoolSize = 100
+	}
+	if config.AllowedSubnet != "" {
+		_, ipNet, err := net.ParseCIDR(config.AllowedSubnet)
+		if err != nil {
+			return fmt.Errorf("invalid allowed_subnet: %v", err)
+		}
+		allowedSubnet = ipNet
+	}
 
 	return nil
 }
 
-func initDBus() error {
-	var err error
+// getDBusConn implements thread-safe connection caching and recovery.
+func getDBusConn() (*dbus.Conn, error) {
+	dbusMu.RLock()
 	if sysBus != nil {
+		obj := sysBus.Object("org.freedesktop.DBus", "/org/freedesktop/DBus")
+		if call := obj.Call("org.freedesktop.DBus.Peer.Ping", 0); call.Err == nil {
+			conn := sysBus
+			dbusMu.RUnlock()
+			return conn, nil
+		}
+	}
+	dbusMu.RUnlock()
+
+	dbusMu.Lock()
+	defer dbusMu.Unlock()
+
+	if sysBus != nil {
+		obj := sysBus.Object("org.freedesktop.DBus", "/org/freedesktop/DBus")
+		if call := obj.Call("org.freedesktop.DBus.Peer.Ping", 0); call.Err == nil {
+			return sysBus, nil
+		}
 		sysBus.Close()
 	}
+
+	var err error
 	sysBus, err = dbus.SystemBus()
 	if err != nil {
-		return fmt.Errorf("failed to connect to system D-Bus: %v", err)
+		return nil, fmt.Errorf("failed to connect to system D-Bus: %v", err)
 	}
-	return nil
-}
-
-// ensureDBusConnection checks if the socket connection is alive.
-// If firewalld restarted, it seamlessly rebuilds the connection.
-func ensureDBusConnection() error {
-	if sysBus == nil {
-		return initDBus()
-	}
-
-	// Light peer ping to verify connection integrity
-	obj := sysBus.Object("org.freedesktop.DBus", "/org/freedesktop/DBus")
-	call := obj.Call("org.freedesktop.DBus.Peer.Ping", 0)
-	if call.Err != nil {
-		log.Println("D-Bus connection severed. Attempting reconnection...")
-		return initDBus()
-	}
-	return nil
+	return sysBus, nil
 }
 
 func getDefaultFirewallZone() string {
-	obj := sysBus.Object("org.fedoraproject.FirewallD1", "/org/fedoraproject/FirewallD1")
+	conn, err := getDBusConn()
+	if err != nil {
+		log.Fatalf("Failed to establish D-Bus connection: %v", err)
+	}
+	obj := conn.Object("org.fedoraproject.FirewallD1", "/org/fedoraproject/FirewallD1")
 	var zone string
-	err := obj.Call("org.fedoraproject.FirewallD1.getDefaultZone", 0).Store(&zone)
+	err = obj.Call("org.fedoraproject.FirewallD1.getDefaultZone", 0).Store(&zone)
 	if err != nil {
 		log.Fatalf("Failed to retrieve default firewalld zone via D-Bus: %v", err)
 	}
@@ -124,15 +155,6 @@ func main() {
 	if err := loadConfig(*configPath); err != nil {
 		log.Fatalf("Failed to load config from %s: %v", *configPath, err)
 	}
-
-	if err := initDBus(); err != nil {
-		log.Fatalf("Initial D-Bus connection failed: %v", err)
-	}
-	defer func() {
-		if sysBus != nil {
-			sysBus.Close()
-		}
-	}()
 
 	if config.FirewallZone == "" {
 		config.FirewallZone = getDefaultFirewallZone()
@@ -158,6 +180,7 @@ func main() {
 
 	log.Printf("NAT-PMP daemon listening on %s (Zone: %s)", listenAddr, config.FirewallZone)
 
+	sem := make(chan struct{}, config.WorkerPoolSize)
 	buf := make([]byte, 256)
 	for {
 		n, clientAddr, err := conn.ReadFromUDP(buf)
@@ -166,15 +189,16 @@ func main() {
 			continue
 		}
 
-		// Security: Create a unique slice copy per packet to prevent goroutine buffer corruption
 		packetData := make([]byte, n)
 		copy(packetData, buf[:n])
 
-		go handlePacket(conn, clientAddr, packetData)
+		sem <- struct{}{}
+		go func(addr *net.UDPAddr, data []byte) {
+			defer func() { <-sem }()
+			handlePacket(conn, addr, data)
+		}(clientAddr, packetData)
 	}
 }
-
-// --- Dynamic Network Helpers ---
 
 func getInterfaceIPv4(ifaceName string) (string, error) {
 	iface, err := net.InterfaceByName(ifaceName)
@@ -196,6 +220,11 @@ func getInterfaceIPv4(ifaceName string) (string, error) {
 }
 
 func getOutboundIP() net.IP {
+	if config.PublicIP != "" {
+		if ip := net.ParseIP(config.PublicIP); ip != nil {
+			return ip.To4()
+		}
+	}
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
 		log.Printf("Warning: Could not determine external IP: %v", err)
@@ -206,9 +235,12 @@ func getOutboundIP() net.IP {
 	return localAddr.IP.To4()
 }
 
-// --- NAT-PMP Protocol Handlers ---
-
 func handlePacket(conn *net.UDPConn, client *net.UDPAddr, data []byte) {
+	if allowedSubnet != nil && !allowedSubnet.Contains(client.IP) {
+		log.Printf("Security drop: Packet from unauthorized IP subnet alignment: %s", client.IP.String())
+		return
+	}
+
 	if len(data) < 2 || data[0] != Version {
 		return
 	}
@@ -230,14 +262,13 @@ func handlePublicIPRequest(conn *net.UDPConn, client *net.UDPAddr) {
 	uptime := uint32(time.Since(startTime).Seconds())
 
 	buf := new(bytes.Buffer)
-	binary.Write(buf, binary.BigEndian, uint8(Version))
-	binary.Write(buf, binary.BigEndian, uint8(OpPublicIP+128))
-	binary.Write(buf, binary.BigEndian, uint16(ResultSuccess))
-	binary.Write(buf, binary.BigEndian, uptime)
-	buf.Write(ip)
+	_ = binary.Write(buf, binary.BigEndian, uint8(Version))
+	_ = binary.Write(buf, binary.BigEndian, uint8(OpPublicIP+128))
+	_ = binary.Write(buf, binary.BigEndian, uint16(ResultSuccess))
+	_ = binary.Write(buf, binary.BigEndian, uptime)
+	_, _ = buf.Write(ip)
 
-	conn.WriteToUDP(buf.Bytes(), client)
-	log.Printf("Sent Public IP (%s) to %s", ip.String(), client.IP.String())
+	_, _ = conn.WriteToUDP(buf.Bytes(), client)
 }
 
 func handleMappingRequest(conn *net.UDPConn, client *net.UDPAddr, data []byte) {
@@ -251,50 +282,71 @@ func handleMappingRequest(conn *net.UDPConn, client *net.UDPAddr, data []byte) {
 		proto = "tcp"
 	}
 
-	if extPort == 0 {
-		extPort = intPort
-	}
-
 	clientIP := client.IP.String()
 
-	// Security: Block privileged host service hijacking attempts
-	if extPort < config.MinPort {
-		log.Printf("Security alert: Client %s attempted to hijack privileged port %d", clientIP, extPort)
-		sendError(conn, client, opCode, ResultNotAuth)
+	// RFC 6886 §3.3: Explicit client port mappings teardown logic routine
+	if intPort == 0 {
+		handleTeardown(conn, client, opCode, extPort, proto)
 		return
 	}
 
+	var allocated bool
+	if extPort == 0 {
+		var ok bool
+		extPort, ok = allocateEphemeralPort(clientIP, proto)
+		if !ok {
+			log.Printf("Resource exhaustion: Ephemeral allocations spent for client %s", clientIP)
+			sendError(conn, client, opCode, ResultOutOfResources)
+			return
+		}
+		allocated = true
+	}
+
+	key := fmt.Sprintf("%s:%d", proto, extPort)
+
+	if !allocated {
+		if extPort < config.MinPort {
+			log.Printf("Security alert: Client %s attempted privileged port hijacking: %d", clientIP, extPort)
+			sendError(conn, client, opCode, ResultNotAuth)
+			return
+		}
+
+		actualClient, loaded := globalPorts.LoadOrStore(key, clientIP)
+		if loaded && actualClient.(string) != clientIP {
+			log.Printf("Conflict: External port lease mapping %s already held by %s", key, actualClient.(string))
+			sendError(conn, client, opCode, ResultOutOfResources)
+			return
+		}
+	}
+
 	if lifetime > config.MaxLifetime {
-		log.Printf("Requested lifetime %ds exceeds maximum. Capping to %ds.", lifetime, config.MaxLifetime)
 		lifetime = config.MaxLifetime
 	}
 
-	// Security: Track and limit total active leases allocated per individual IP
-	if !trackAndLimitLease(clientIP, extPort, lifetime) {
-		log.Printf("Security alert: Client %s denied mapping; hit maximum allowed port limit (%d)", clientIP, config.MaxPortsPerClient)
+	// Phase 1: Resource verification boundary checking
+	if !checkLeaseLimit(clientIP, key, lifetime) {
+		log.Printf("Security alert: Client %s exceeded active port map exhaustion constraints", clientIP)
+		if allocated {
+			globalPorts.Delete(key)
+		}
 		sendError(conn, client, opCode, ResultOutOfResources)
 		return
 	}
 
+	// Phase 2: Execution barrier over system configuration mechanisms
 	err := manageFirewalldDBus(proto, extPort, intPort, clientIP, lifetime)
 	if err != nil {
-		log.Printf("D-Bus transaction failed: %v", err)
-		trackAndLimitLease(clientIP, extPort, 0) // Undo RAM state allocation tracking on total failure
+		log.Printf("D-Bus rule transaction dropped: %v", err)
+		if allocated || lifetime == 0 {
+			globalPorts.Delete(key)
+		}
 		sendError(conn, client, opCode, ResultNetworkErr)
 		return
 	}
 
-	uptime := uint32(time.Since(startTime).Seconds())
-	buf := new(bytes.Buffer)
-	binary.Write(buf, binary.BigEndian, uint8(Version))
-	binary.Write(buf, binary.BigEndian, uint8(opCode+128))
-	binary.Write(buf, binary.BigEndian, uint16(ResultSuccess))
-	binary.Write(buf, binary.BigEndian, uptime)
-	binary.Write(buf, binary.BigEndian, intPort)
-	binary.Write(buf, binary.BigEndian, extPort)
-	binary.Write(buf, binary.BigEndian, lifetime)
-
-	conn.WriteToUDP(buf.Bytes(), client)
+	// Phase 3: Structural RAM mutations only execute upon verified transaction state commits
+	commitLease(clientIP, proto, extPort, intPort, lifetime)
+	sendMappingResponse(conn, client, opCode, intPort, extPort, lifetime)
 
 	if lifetime > 0 {
 		log.Printf("Mapped %s %d -> %s:%d for %ds", proto, extPort, clientIP, intPort, lifetime)
@@ -303,28 +355,68 @@ func handleMappingRequest(conn *net.UDPConn, client *net.UDPAddr, data []byte) {
 	}
 }
 
+func handleTeardown(conn *net.UDPConn, client *net.UDPAddr, opCode uint8, extPort uint16, proto string) {
+	clientIP := client.IP.String()
+	val, ok := clientStates.Load(clientIP)
+	if !ok {
+		sendMappingResponse(conn, client, opCode, 0, 0, 0)
+		return
+	}
+
+	cs := val.(*clientState)
+	cs.Lock()
+	defer cs.Unlock()
+
+	removeAll := (extPort == 0)
+
+	for key, lease := range cs.activePorts {
+		if removeAll || (lease.Protocol == proto && lease.ExtPort == extPort) {
+			if lease.Timer != nil {
+				lease.Timer.Stop()
+			}
+			_ = manageFirewalldDBus(lease.Protocol, lease.ExtPort, lease.IntPort, clientIP, 0)
+			globalPorts.Delete(key)
+			delete(cs.activePorts, key)
+		}
+	}
+
+	sendMappingResponse(conn, client, opCode, 0, extPort, 0)
+}
+
+func sendMappingResponse(conn *net.UDPConn, client *net.UDPAddr, opCode uint8, intPort, extPort uint16, lifetime uint32) {
+	uptime := uint32(time.Since(startTime).Seconds())
+	buf := new(bytes.Buffer)
+	_ = binary.Write(buf, binary.BigEndian, uint8(Version))
+	_ = binary.Write(buf, binary.BigEndian, uint8(opCode+128))
+	_ = binary.Write(buf, binary.BigEndian, uint16(ResultSuccess))
+	_ = binary.Write(buf, binary.BigEndian, uptime)
+	_ = binary.Write(buf, binary.BigEndian, intPort)
+	_ = binary.Write(buf, binary.BigEndian, extPort)
+	_ = binary.Write(buf, binary.BigEndian, lifetime)
+	_, _ = conn.WriteToUDP(buf.Bytes(), client)
+}
+
 func sendError(conn *net.UDPConn, client *net.UDPAddr, reqOp uint8, errCode uint16) {
 	uptime := uint32(time.Since(startTime).Seconds())
 	buf := new(bytes.Buffer)
-	binary.Write(buf, binary.BigEndian, uint8(Version))
-	binary.Write(buf, binary.BigEndian, uint8(reqOp+128))
-	binary.Write(buf, binary.BigEndian, errCode)
-	binary.Write(buf, binary.BigEndian, uptime)
-	conn.WriteToUDP(buf.Bytes(), client)
+	_ = binary.Write(buf, binary.BigEndian, uint8(Version))
+	_ = binary.Write(buf, binary.BigEndian, uint8(reqOp+128))
+	_ = binary.Write(buf, binary.BigEndian, errCode)
+	_ = binary.Write(buf, binary.BigEndian, uptime)
+	_, _ = conn.WriteToUDP(buf.Bytes(), client)
 }
 
 func manageFirewalldDBus(proto string, extPort, intPort uint16, ip string, lifetime uint32) error {
-	if err := ensureDBusConnection(); err != nil {
+	conn, err := getDBusConn()
+	if err != nil {
 		return fmt.Errorf("D-Bus operational failure: %v", err)
 	}
 
-	obj := sysBus.Object("org.fedoraproject.FirewallD1", "/org/fedoraproject/FirewallD1")
-
+	obj := conn.Object("org.fedoraproject.FirewallD1", "/org/fedoraproject/FirewallD1")
 	extStr := strconv.Itoa(int(extPort))
 	intStr := strconv.Itoa(int(intPort))
 
 	if lifetime > 0 {
-		// Native firewalld signature handles timeouts directly inside the system message bus daemon
 		call := obj.Call("org.fedoraproject.FirewallD1.zone.addForwardPort", 0,
 			config.FirewallZone, extStr, proto, intStr, ip, int32(lifetime))
 		return call.Err
@@ -333,36 +425,81 @@ func manageFirewalldDBus(proto string, extPort, intPort uint16, ip string, lifet
 	call := obj.Call("org.fedoraproject.FirewallD1.zone.removeForwardPort", 0,
 		config.FirewallZone, extStr, proto, intStr, ip)
 
-	// Suppress warnings when wiping mappings that do not exist or were dropped via external changes
 	if call.Err != nil && call.Err.Error() != "INVALID_RULE" && call.Err.Error() != "NOT_ENABLED" {
 		return call.Err
 	}
 	return nil
 }
 
-func trackAndLimitLease(ip string, port uint16, lifetime uint32) bool {
-	val, _ := clientStates.LoadOrStore(ip, &clientState{activePorts: make(map[uint16]*time.Timer)})
-	cs := val.(*clientState)
+func allocateEphemeralPort(clientIP string, proto string) (uint16, bool) {
+	maxPort := uint16(65535)
+	if config.MinPort >= maxPort {
+		return 0, false
+	}
+	rangeSize := int(maxPort - config.MinPort + 1)
 
+	nBig, err := rand.Int(rand.Reader, big.NewInt(int64(rangeSize)))
+	if err != nil {
+		return 0, false
+	}
+	start := int(nBig.Int64())
+
+	for i := 0; i < rangeSize; i++ {
+		p := config.MinPort + uint16((start+i)%rangeSize)
+		key := fmt.Sprintf("%s:%d", proto, p)
+		if _, loaded := globalPorts.LoadOrStore(key, clientIP); !loaded {
+			return p, true
+		}
+	}
+	return 0, false
+}
+
+func checkLeaseLimit(ip string, key string, lifetime uint32) bool {
+	if lifetime == 0 {
+		return true
+	}
+	val, _ := clientStates.LoadOrStore(ip, &clientState{activePorts: make(map[string]*Lease)})
+	cs := val.(*clientState)
 	cs.Lock()
 	defer cs.Unlock()
 
-	if timer, exists := cs.activePorts[port]; exists {
-		timer.Stop()
-	} else if len(cs.activePorts) >= config.MaxPortsPerClient && lifetime > 0 {
+	_, exists := cs.activePorts[key]
+	if !exists && len(cs.activePorts) >= config.MaxPortsPerClient {
 		return false
+	}
+	return true
+}
+
+func commitLease(ip string, proto string, extPort, intPort uint16, lifetime uint32) {
+	key := fmt.Sprintf("%s:%d", proto, extPort)
+	val, _ := clientStates.LoadOrStore(ip, &clientState{activePorts: make(map[string]*Lease)})
+	cs := val.(*clientState)
+	cs.Lock()
+	defer cs.Unlock()
+
+	if oldLease, exists := cs.activePorts[key]; exists {
+		if oldLease.Timer != nil {
+			oldLease.Timer.Stop()
+		}
 	}
 
 	if lifetime > 0 {
-		// Maintain parity with firewalld's automatic kernel timeout routine
-		cs.activePorts[port] = time.AfterFunc(time.Duration(lifetime)*time.Second, func() {
+		globalPorts.Store(key, ip)
+		lease := &Lease{
+			IntPort:  intPort,
+			ExtPort:  extPort,
+			Protocol: proto,
+		}
+		lease.Timer = time.AfterFunc(time.Duration(lifetime)*time.Second, func() {
 			cs.Lock()
-			delete(cs.activePorts, port)
+			delete(cs.activePorts, key)
 			cs.Unlock()
+			globalPorts.Delete(key)
 		})
+		cs.activePorts[key] = lease
 	} else {
-		delete(cs.activePorts, port)
+		delete(cs.activePorts, key)
+		globalPorts.Delete(key)
 	}
-
-	return true
 }
+

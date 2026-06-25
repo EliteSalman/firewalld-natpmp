@@ -1,92 +1,111 @@
 # firewalld-natpmp
 
-`firewalld-natpmp` is a lightweight, conflict-free NAT-PMP (RFC 6886) daemon built specifically for modern Linux routers using `firewalld`. 
+A lightweight, secure, and native NAT-PMP (RFC 6886) daemon designed exclusively for environments running `firewalld`. 
 
-Legacy tools like `miniupnpd` were designed before `nftables` and `firewalld` became the standard. They hijack kernel netfilter hooks, which regularly causes conflicts with WireGuard routing, interface masquerading, and firewall reloads. `firewalld-natpmp` solves this by acting as a native extension to the `firewalld` ecosystem.
+Unlike legacy UPnP or PCP daemons that interact directly with `iptables` or `nftables`—often leading to orphaned rules and hook conflicts—`firewalld-natpmp` communicates natively via the firewalld D-Bus API. It offloads lease timeouts directly to the kernel and system message bus, ensuring your firewall state remains clean and synchronised, making it an ideal solution for WireGuard VPN gateways and custom Linux routers.
 
-## Architecture & Features
+## Features
 
-* **Native D-Bus Integration:** Instead of executing slow shell commands or manipulating kernel tables directly, `firewalld-natpmp` communicates exclusively through the `firewalld` D-Bus socket.
-* **Zero Orphaned Rules:** Rule expiration is offloaded entirely to `firewalld`'s internal timer engine. If the daemon crashes, `firewalld` will still securely tear down the open port at the precise moment the lease expires.
-* **Auto-Healing:** If `firewalld` is restarted or reloaded, the daemon automatically re-establishes the D-Bus connection and restores active client states upon their next renewal heartbeat.
-* **Security Hardened:** Includes protection against privileged port hijacking (e.g., SSH/HTTPS interception) and limits concurrent active rules per IP to prevent state exhaustion Denial of Service (DoS).
-
-## Supported Operating Systems
-
-* **Fully Supported:** Fedora, AlmaLinux, RHEL, CentOS Stream, Rocky Linux (Any system using `firewalld` natively).
-* **Coming Soon:** Debian, Ubuntu, and derivatives.
+* **Native D-Bus Integration:** Modifies firewall states safely using standard `firewalld` zone forwarding.
+* **Strict RFC 6886 Compliance:** Fully supports dynamic ephemeral port allocation (`extPort == 0`) and protocol-wide mapping teardowns.
+* **DoS Protection:** Utilises a bounded worker pool to restrict concurrent UDP packet processing, preventing memory exhaustion attacks.
+* **Subnet Filtering:** Optionally restrict port mapping requests to specific CIDR blocks (e.g., your local LAN or VPN tunnel interface).
+* **State Safety:** Employs a two-phase commit architecture and read-write mutex locking to ensure active leases and system D-Bus connections survive daemon restarts or D-Bus reload events without desynchronisation.
+* **Privileged Port Protection:** Blocks unauthorised attempts to hijack system ports (under 1024).
+* **Zero Dependencies:** Written in Go, deployed as a single statically linked binary.
 
 ## Installation
 
-### Method 1: RPM via Fedora COPR (Recommended)
-For RHEL, AlmaLinux, Fedora, and compatible derivatives, the daemon is packaged and maintained in COPR.
+### Fedora / CentOS Stream / RHEL / RHEL Clones (AlmaLinux, Rocky Linux, Oracle Linux) (via COPR)
+
+You can install `firewalld-natpmp` directly from the official COPR repository:
 
 ```bash
+sudo dnf install
 sudo dnf copr enable elitesalman/firewalld-natpmp
 sudo dnf install firewalld-natpmp
-sudo systemctl enable --now firewalld-natpmp
 ```
 
-### Method 2: Compile From Source
-You will need Go 1.18+ installed.
+### Manual Build
+
+Ensure you have Go 1.18+ installed. You can copy and paste the following block directly into your terminal to build and install the daemon, its configuration, and the systemd service.
 
 ```bash
 git clone [https://github.com/EliteSalman/firewalld-natpmp.git](https://github.com/EliteSalman/firewalld-natpmp.git)
 cd firewalld-natpmp
-go build -ldflags="-s -w" -o firewalld-natpmp main.go
-sudo cp firewalld-natpmp /usr/sbin/
-```
+go build -buildmode=pie -ldflags="-s -w -extldflags '-static'" -o firewalld-natpmp main.go
 
-If compiling from source, deploy the systemd unit and configuration manually:
+# Install the binary, configuration, and systemd service file
+sudo install -Dpm 0755 firewalld-natpmp /usr/sbin/firewalld-natpmp
+sudo install -Dpm 0644 config.yaml /etc/firewalld-natpmp/config.yaml
+sudo install -Dpm 0644 firewalld-natpmp.service /usr/lib/systemd/system/firewalld-natpmp.service
 
-```bash
-sudo mkdir -p /etc/firewalld-natpmp
-sudo cp config.yaml /etc/firewalld-natpmp/
-sudo cp firewalld-natpmp.service /usr/lib/systemd/system/
+# Reload systemd to recognise the new service
 sudo systemctl daemon-reload
-sudo systemctl enable --now firewalld-natpmp
 ```
 
 ## Configuration
 
-The configuration file is located at `/etc/firewalld-natpmp/config.yaml`. 
+Configuration is managed via `/etc/firewalld-natpmp/config.yaml`. Upon installation, you must edit this file to define your listening interface.
 
 ```yaml
-# Interface to listen on for NAT-PMP requests (e.g., eth1, eth2)
-# SECURITY WARNING: This MUST be a trusted internal interface.
-listen_interface: "eth1"
+# /etc/firewalld-natpmp/config.yaml
+# Configuration file for the Firewalld NAT-PMP Daemon
 
-# Port to listen on (Default: 5351)
+# REQUIRED: The network interface the daemon listens on.
+# You must uncomment and set this to match your environment (e.g., eth0, wg0).
+# listen_interface: "wg0"
+
+# The UDP port to listen for incoming NAT-PMP requests (RFC 6886 default is 5351)
 listen_port: 5351
 
-# The firewalld zone to apply dynamic rules to. 
-# Leave blank ("") to auto-detect the default active zone.
+# The firewalld zone where port-forwarding rules will be dynamically applied.
+# If left blank, the daemon automatically detects and uses the default active system zone.
 firewall_zone: ""
 
-# Maximum allowed lifetime for a port mapping in seconds.
+# Maximum lease lifetime in seconds allowed for a port mapping (Default: 86400 / 24 hours)
 max_lifetime: 86400
 
-# Minimum allowed external port to prevent hijacking of privileged host services.
+# Minimum external port allowed for client allocation to prevent privileged port hijacking (Default: 1024)
 min_port: 1024
 
-# Maximum concurrent port mappings allowed per client IP.
+# Maximum number of active port mappings allowed per unique client IP address (Default: 50)
 max_ports_per_client: 50
+
+# Security: Restrict incoming requests to a specific subnet (e.g., your local LAN or VPN tunnel).
+# Packets originating from outside this subnet will be dropped to prevent unauthorised WAN access.
+# Uncomment and configure this to match your environment.
+# allowed_subnet: "192.0.2.0/24"
+
+# The external public WAN IP address returned to clients during Public IP queries.
+# If left blank, the daemon falls back to auto-detecting the local outbound routing interface IP.
+# Uncomment and configure this to match your environment if needed.
+# public_ip: "203.0.113.1"
+
+# Security: Maximum number of concurrent worker routines processing UDP packets to prevent memory exhaustion DoS floods (Default: 100)
+worker_pool_size: 100
 ```
 
-## Client Usage
+## Usage
 
-Clients on the internal network (e.g., `192.0.2.x` range) can request port mappings using standard NAT-PMP software like qBittorrent, Tailscale, or CLI tools like `natpmpc`.
+Once configured, start and enable the daemon via systemd:
 
-**Note:** The NAT-PMP protocol strictly dictates unicast UDP communication on port 5351. UPnP IGD clients relying on multicast discovery will not interact with this daemon.
-
-Example manual request using `natpmpc` from a client machine:
 ```bash
-# Request the public gateway IP
-natpmpc -g 192.0.2.1
-
-# Map external TCP port 8989 to internal port 8989
-natpmpc -g 192.0.2.1 -a 8989 8989 tcp
+sudo systemctl enable --now firewalld-natpmp
 ```
+
+To verify the daemon is successfully bound to your interface and D-Bus:
+
+```bash
+sudo systemctl status firewalld-natpmp
+```
+
+## Security Considerations
+
+If you are deploying `firewalld-natpmp` in any environment (Home Router, VPC, or VPN Gateway):
+1. Ensure `listen_interface` is set strictly to your internal network or tunnel interface (e.g., `eth1`, `wg0`). **Do not listen on your public WAN interface.**
+2. Use the `allowed_subnet` variable to drop spoofed packets from unauthorised networks.
+3. Explicitly define `public_ip` if your gateway sits behind another NAT layer (like an AWS/DigitalOcean VPC or CGNAT), otherwise clients will be given the internal routing address instead of your true public IPv4.
 
 ## Licence
 This project is licenced under the GNU General Public Licence v3 (GPLv3). See the `LICENSE` file for details.
