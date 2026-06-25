@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           firewalld-natpmp
-Version:        1.1.0
+Version:        1.2.0
 Release:        1%{?dist}
 Summary:        Native D-Bus NAT-PMP daemon for firewalld
 
@@ -50,6 +50,14 @@ install -Dpm 0644 %{name}.service %{buildroot}%{_unitdir}/%{name}.service
 %{_unitdir}/%{name}.service
 
 %changelog
+* Fri Jun 26 2026 Salman Shafi <hello@salmanshafi.net> - 1.2.0-1
+- Decoupled NAT rule lifecycle from firewalld timeouts using zero-timeout permanent rules and internal timers
+- Implemented D-Bus Reloaded signal interception for automatic runtime state recovery
+- Added namespace isolation via JSON state file (/var/run/firewalld-natpmp.json) to preserve external admin rules
+- Added graceful shutdown handling (SIGINT/SIGTERM) to actively flush daemon-managed D-Bus port forwards before exit
+- Fixed RFC 6886 compliance bug resolving -52 timeout hangs by padding OpCode 1/2 error responses to 16 bytes
+- Fixed network micro-outages during lease renewals by bypassing D-Bus execution on active mappings
+
 * Thu Jun 25 2026 Salman Shafi <hello@salmanshafi.net> - 1.1.0-1
 - Overhaul daemon architecture to patch critical concurrency data races and bounded resource leaks
 - Implement strict RFC 6886 §3.3 protocol handling for ephemeral port allocation and client teardowns
@@ -61,4 +69,3 @@ install -Dpm 0644 %{name}.service %{buildroot}%{_unitdir}/%{name}.service
 
 * Wed Jun 24 2026 Salman Shafi <hello@salmanshafi.net> - 1.0.0-1
 - Initial public release
-

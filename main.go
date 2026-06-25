@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -284,7 +285,6 @@ func handleMappingRequest(conn *net.UDPConn, client *net.UDPAddr, data []byte) {
 
 	clientIP := client.IP.String()
 
-	// RFC 6886 §3.3: Explicit client port mappings teardown logic routine
 	if intPort == 0 {
 		handleTeardown(conn, client, opCode, extPort, proto)
 		return
@@ -323,7 +323,6 @@ func handleMappingRequest(conn *net.UDPConn, client *net.UDPAddr, data []byte) {
 		lifetime = config.MaxLifetime
 	}
 
-	// Phase 1: Resource verification boundary checking
 	if !checkLeaseLimit(clientIP, key, lifetime) {
 		log.Printf("Security alert: Client %s exceeded active port map exhaustion constraints", clientIP)
 		if allocated {
@@ -333,23 +332,39 @@ func handleMappingRequest(conn *net.UDPConn, client *net.UDPAddr, data []byte) {
 		return
 	}
 
-	// Phase 2: Execution barrier over system configuration mechanisms
-	err := manageFirewalldDBus(proto, extPort, intPort, clientIP, lifetime)
-	if err != nil {
-		log.Printf("D-Bus rule transaction dropped: %v", err)
-		if allocated || lifetime == 0 {
-			globalPorts.Delete(key)
+	// Detect active renewals to bypass the execution barrier and prevent network micro-outages
+	val, _ := clientStates.Load(clientIP)
+	isRenewal := false
+	if val != nil {
+		cs := val.(*clientState)
+		cs.Lock()
+		if oldLease, exists := cs.activePorts[key]; exists && oldLease.IntPort == intPort {
+			isRenewal = true
 		}
-		sendError(conn, client, opCode, ResultNetworkErr)
-		return
+		cs.Unlock()
 	}
 
-	// Phase 3: Structural RAM mutations only execute upon verified transaction state commits
+	if !isRenewal {
+		err := manageFirewalldDBus(proto, extPort, intPort, clientIP, true)
+		if err != nil {
+			log.Printf("D-Bus rule transaction dropped: %v", err)
+			if allocated || lifetime == 0 {
+				globalPorts.Delete(key)
+			}
+			sendError(conn, client, opCode, ResultNetworkErr)
+			return
+		}
+	}
+
 	commitLease(clientIP, proto, extPort, intPort, lifetime)
 	sendMappingResponse(conn, client, opCode, intPort, extPort, lifetime)
 
 	if lifetime > 0 {
-		log.Printf("Mapped %s %d -> %s:%d for %ds", proto, extPort, clientIP, intPort, lifetime)
+		if isRenewal {
+			log.Printf("Renewed %s %d -> %s:%d for %ds", proto, extPort, clientIP, intPort, lifetime)
+		} else {
+			log.Printf("Mapped %s %d -> %s:%d for %ds", proto, extPort, clientIP, intPort, lifetime)
+		}
 	} else {
 		log.Printf("Removed mapping %s %d -> %s:%d", proto, extPort, clientIP, intPort)
 	}
@@ -374,7 +389,7 @@ func handleTeardown(conn *net.UDPConn, client *net.UDPAddr, opCode uint8, extPor
 			if lease.Timer != nil {
 				lease.Timer.Stop()
 			}
-			_ = manageFirewalldDBus(lease.Protocol, lease.ExtPort, lease.IntPort, clientIP, 0)
+			_ = manageFirewalldDBus(lease.Protocol, lease.ExtPort, lease.IntPort, clientIP, false)
 			globalPorts.Delete(key)
 			delete(cs.activePorts, key)
 		}
@@ -403,10 +418,17 @@ func sendError(conn *net.UDPConn, client *net.UDPAddr, reqOp uint8, errCode uint
 	_ = binary.Write(buf, binary.BigEndian, uint8(reqOp+128))
 	_ = binary.Write(buf, binary.BigEndian, errCode)
 	_ = binary.Write(buf, binary.BigEndian, uptime)
+
+	if reqOp == OpMapUDP || reqOp == OpMapTCP {
+		_ = binary.Write(buf, binary.BigEndian, uint16(0)) // intPort
+		_ = binary.Write(buf, binary.BigEndian, uint16(0)) // extPort
+		_ = binary.Write(buf, binary.BigEndian, uint32(0)) // lifetime
+	}
+
 	_, _ = conn.WriteToUDP(buf.Bytes(), client)
 }
 
-func manageFirewalldDBus(proto string, extPort, intPort uint16, ip string, lifetime uint32) error {
+func manageFirewalldDBus(proto string, extPort, intPort uint16, ip string, isAdd bool) error {
 	conn, err := getDBusConn()
 	if err != nil {
 		return fmt.Errorf("D-Bus operational failure: %v", err)
@@ -416,10 +438,22 @@ func manageFirewalldDBus(proto string, extPort, intPort uint16, ip string, lifet
 	extStr := strconv.Itoa(int(extPort))
 	intStr := strconv.Itoa(int(intPort))
 
-	if lifetime > 0 {
+	if isAdd {
+		// Pass timeout 0 to firewalld, shifting lifecycle management entirely to the Go daemon
 		call := obj.Call("org.fedoraproject.FirewallD1.zone.addForwardPort", 0,
-			config.FirewallZone, extStr, proto, intStr, ip, int32(lifetime))
-		return call.Err
+			config.FirewallZone, extStr, proto, intStr, ip, int32(0))
+
+		if call.Err != nil {
+			// Catch desynced runtime states and force an overwrite
+			if strings.Contains(call.Err.Error(), "ALREADY_ENABLED") {
+				_ = obj.Call("org.fedoraproject.FirewallD1.zone.removeForwardPort", 0,
+					config.FirewallZone, extStr, proto, intStr, ip)
+				call = obj.Call("org.fedoraproject.FirewallD1.zone.addForwardPort", 0,
+					config.FirewallZone, extStr, proto, intStr, ip, int32(0))
+			}
+			return call.Err
+		}
+		return nil
 	}
 
 	call := obj.Call("org.fedoraproject.FirewallD1.zone.removeForwardPort", 0,
@@ -495,6 +529,10 @@ func commitLease(ip string, proto string, extPort, intPort uint16, lifetime uint
 			delete(cs.activePorts, key)
 			cs.Unlock()
 			globalPorts.Delete(key)
+
+			// Execute delayed structural mutation
+			_ = manageFirewalldDBus(proto, extPort, intPort, ip, false)
+			log.Printf("Lease expired: Removed mapping %s %d -> %s:%d", proto, extPort, ip, intPort)
 		})
 		cs.activePorts[key] = lease
 	} else {

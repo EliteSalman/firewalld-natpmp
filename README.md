@@ -2,15 +2,18 @@
 
 A lightweight, secure, and native NAT-PMP (RFC 6886) daemon designed exclusively for environments running `firewalld`. 
 
-Unlike legacy UPnP or PCP daemons that interact directly with `iptables` or `nftables`—often leading to orphaned rules and hook conflicts—`firewalld-natpmp` communicates natively via the firewalld D-Bus API. It offloads lease timeouts directly to the kernel and system message bus, ensuring your firewall state remains clean and synchronised, making it an ideal solution for WireGuard VPN gateways and custom Linux routers.
+Unlike legacy UPnP or PCP daemons that interact directly with `iptables` or `nftables`—often leading to orphaned rules and hook conflicts—`firewalld-natpmp` communicates natively via the firewalld D-Bus API. It manages lease lifecycles entirely within its own memory space using zero-timeout permanent rules, preventing the routing micro-outages common during standard lease renewals. This ensures your firewall state remains clean and synchronised, making it an ideal solution for WireGuard VPN gateways and custom Linux routers.
 
 ## Features
 
 * **Native D-Bus Integration:** Modifies firewall states safely using standard `firewalld` zone forwarding.
 * **Strict RFC 6886 Compliance:** Fully supports dynamic ephemeral port allocation (`extPort == 0`) and protocol-wide mapping teardowns.
+* **Zero Downtime Renewals:** Bypasses the D-Bus execution barrier for active lease renewals, eliminating network micro-outages caused by kernel netfilter rule recreation.
+* **Firewalld Reload Resilience:** Automatically intercepts D-Bus `Reloaded` signals to instantly restore NAT leases into the runtime environment if an administrator reloads the firewall.
+* **Crash Recovery & Namespace Isolation:** Tracks injected rules via an isolated JSON state file (`/var/run/firewalld-natpmp.json`). This ensures the daemon can recover gracefully from catastrophic crashes without ever touching or flushing external NAT rules manually added by administrators.
+* **Graceful Teardowns:** Intercepts `SIGINT` and `SIGTERM` signals to proactively flush daemon-managed D-Bus port forwards before exiting, preventing orphaned rules.
 * **DoS Protection:** Utilises a bounded worker pool to restrict concurrent UDP packet processing, preventing memory exhaustion attacks.
 * **Subnet Filtering:** Optionally restrict port mapping requests to specific CIDR blocks (e.g., your local LAN or VPN tunnel interface).
-* **State Safety:** Employs a two-phase commit architecture and read-write mutex locking to ensure active leases and system D-Bus connections survive daemon restarts or D-Bus reload events without desynchronisation.
 * **Privileged Port Protection:** Blocks unauthorised attempts to hijack system ports (under 1024).
 * **Zero Dependencies:** Written in Go, deployed as a single statically linked binary.
 
@@ -21,7 +24,6 @@ Unlike legacy UPnP or PCP daemons that interact directly with `iptables` or `nft
 You can install `firewalld-natpmp` directly from the official COPR repository:
 
 ```bash
-sudo dnf install
 sudo dnf copr enable elitesalman/firewalld-natpmp
 sudo dnf install firewalld-natpmp
 ```
@@ -53,8 +55,8 @@ Configuration is managed via `/etc/firewalld-natpmp/config.yaml`. Upon installat
 # Configuration file for the Firewalld NAT-PMP Daemon
 
 # REQUIRED: The network interface the daemon listens on.
-# You must uncomment and set this to match your environment (e.g., eth0, wg0).
-# listen_interface: "wg0"
+# You must uncomment and set this to match your environment (e.g., eth1, wg0).
+# listen_interface: "eth1"
 
 # The UDP port to listen for incoming NAT-PMP requests (RFC 6886 default is 5351)
 listen_port: 5351

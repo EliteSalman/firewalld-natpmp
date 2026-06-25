@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-06-26
+
+### Added
+* Implemented firewalld reload detection via D-Bus `Reloaded` signal. The daemon now automatically intercepts administrator-triggered reloads and restores its active NAT-PMP leases directly back into the runtime environment without waiting for client renewals.
+* Introduced namespace isolation through a JSON-based recovery state file (`/var/run/firewalld-natpmp.json`). The daemon strictly tracks its own injected rules, ensuring it never flushes or interferes with external NAT rules explicitly added by system administrators.
+* Implemented graceful shutdown handling via `os/signal`. Intercepts `SIGINT` and `SIGTERM` to proactively flush active D-Bus port forwarding rules from Firewalld before daemon termination.
+
+### Changed
+* Decoupled NAT rule lifecycle management from Firewalld's internal timeout mechanism. D-Bus port forwarding rules are now injected into the runtime environment as permanent (timeout `0`).
+* Shifted all lease expiration and teardown execution to the Go daemon's internal memory space using asynchronous `time.AfterFunc` timers.
+* Adjusted the startup sanitisation routine to rely solely on the isolated JSON recovery state, removing blind broad-scope D-Bus forward port flushing.
+
+### Fixed
+* Resolved a routing micro-outage bug triggered during standard lease renewals. Renewal requests for active mappings now strictly update the in-memory timer and bypass the D-Bus execution barrier, preventing `netfilter` drop gaps.
+* Fixed an RFC 6886 compliance violation where `sendError` generated truncated 8-byte payloads. Error responses for OpCodes 1 and 2 are now correctly padded to the mandated 16 bytes, resolving `-52` (`NATPMP_ERR_RECVFROM`) timeout hangs in strict clients.
+
 ## [1.1.0] - 2026-06-25
 
 ### Added
